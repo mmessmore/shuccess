@@ -1,0 +1,7 @@
+#!/bin/bash
+
+verbosity="$1"
+shift
+msg="$*"
+
+[ "$VERBOSE" -ge "$verbosity" ] && echo "$msg"

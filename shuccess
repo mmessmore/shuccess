@@ -1,0 +1,440 @@
+#!/bin/bash
+
+prog="${0##*/}"
+full_prog_path="$0"
+
+BOLD="$(tput bold)"
+GREEN="${BOLD}$(tput setaf 2)"
+RED="${BOLD}$(tput setaf 1)"
+RESET="$(tput sgr0)"
+export VERBOSE=0
+CSV_FILE=""
+JUNIT_FILE=""
+TESTSUITE="Shuccess"
+
+
+################################################################################
+# These hook functions are always run, so do not remove them.
+#   - You can set them to just "return 0" if you want them to be noops.
+#   - Fill them in if you want to do things within them for hooks
+#
+# pre_run   executed before testing starts
+# post_run  executed after testing end
+# pre_test  executed before every individual test
+#           always passed the test function name as the first argument
+# post_test executed after every individual test
+#           always passed the test function name as the first argument
+################################################################################
+
+
+if ! [ -x pre_run ]; then
+	pre_run() {
+		verbose 1 "Starting testing"
+		return 0
+	}
+fi
+
+if ! [ -x post_run ]; then
+	post_run() {
+		verbose 1 "Finished testing"
+		return 0
+	}
+fi
+
+if ! [ -x pre_test ]; then
+	pre_test() {
+		local func="$1"
+		verbose 1 "Running ${func}"
+		return 0
+	}
+fi
+
+if ! [ -x post_test ]; then
+	post_test() {
+		local func="$1"
+		verbose 1 "Finished ${func}"
+		return 0
+	}
+fi
+
+################################################################################
+# ADD TESTS HERE
+# Tests need a comment before them in the format:
+# test [number] [description]
+################################################################################
+
+# test 1 Dummy success test
+test_positive() {
+	echo "Intentional Error"
+	return 0
+}
+
+# test 2 Dummy failure test
+test_negative() {
+	echo "Intentional Failure"
+	return 1
+}
+
+################################################################################
+# STOP ADDING TESTS
+################################################################################
+
+# if used as w/ file-based tests
+[ -d "./libexec" ] &&
+	export PATH="./libexec:${PATH}"
+
+usage() {
+	cat <<EOM
+${prog}
+  A self-contained unit testing framework for shell.
+
+  Tests may be added inline or as scripts in this directory. See examples for
+  formatting requirements.
+
+USAGE
+  ${prog} [-v] [-t NAME] [-r PATH] [-x PATH] [TEST_NUM]
+  ${prog} -P
+  ${prog} -h
+
+ARGUMENTS
+  TEST_NUM    Optionally specify a specific test by number
+
+OPTIONS
+  -c PATH      Output CSV report file to PATH
+  -h           This friendly help message
+  -j PATH      Output JUnit formatted output to PATH
+  -P           Print all tests
+  -t NAME      Testsuite (and "class") name for reporting (Default: ${TESTSUITE})
+  -v           Verbose, set more than once to be more verbose
+
+EXAMPLES
+  # Show all tests that would be run and their number
+  ./${prog} -P
+
+  # Run with a testsuite name of "Camaro" and output CSV and JUnit XML
+  ./${prog} -c report.csv -j ./build/test-results/junit.xml
+
+  # Run only test number 10 (handy for testing tests)
+  ./${prog} 10
+EOM
+}
+
+#####################################
+# Variables to keep up with reporting
+#####################################
+TOTAL=0
+SUCCEEDED=0
+FAILED=0
+HOSTNAME="$(uname -n)"
+TEST_DATE="$(date -Iseconds)"
+TOTAL_START="$(date +%s)"
+TEST_NAMES=()
+TEST_SUCCESS=()
+TEST_TIME=()
+TEST_MESSAGE=()
+
+
+# Gross BSD vs GNU detection
+if find . -maxdepth 1 -perm +111 >/dev/null 2>&1; then
+	# BSD find
+	find_exec="-perm +111"
+else
+	# GNU find
+	find_exec="-executable"
+fi
+
+report() {
+	local csv="$1"
+	local junit="$2"
+
+	report_screen
+
+	if [ -n "$csv" ]; then
+		report_csv "$csv"
+	fi
+	if [ -n "$junit" ]; then
+		report_junit "$junit"
+	fi
+}
+
+report_csv() {
+	local path="$1"
+	local i=0
+	local succeeded=0
+	local failed=0
+
+	[ -d "$(dirname "$path")" ] || mkdir "$(dirname "$path")"
+
+	echo "\"${TESTSUITE} ran at ${TEST_DATE} on ${HOSTNAME}\"" > "$path"
+	echo "\"Name\",\"Succcess\",\"Time\",\"Message\"" >> "$path"
+	for name in "${TEST_NAMES[@]}"; do
+		echo "\"${name}\",\"${TEST_SUCCESS[i]}\",\"${TEST_TIME[i]}\",\"${TEST_MESSAGE[i]}\"" >> "$path"
+		if "${TEST_SUCCESS[i]}"; then
+			succeeded=$((succeeded + 1))
+		else
+			failed=$((failed + 1))
+		fi
+		i=$((i+1))
+	done
+	echo "\"Total\",\"${succeeded} Succeeded,${failed} Failed\",\"${TOTAL_TIME}\",\"\"" >> "$path"
+}
+
+# ew gross, we're hand generating XML for a JUnit report file
+report_junit() {
+	local path="$1"
+	local failed=0
+
+	[ -d "$(dirname "$path")" ] || mkdir "$(dirname "$path")"
+
+	for i in "${TEST_SUCCESS[@]}"; do
+		! "$i" && failed="$((failed + 1))"
+	done
+	cat > "$path" <<EOS
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites>
+<testsuite name="${TESTSUITE}"
+	 tests="${#TEST_NAMES[@]}"
+	 errors="0"
+	 failures="${failed}"
+	 hostname="${HOSTNAME}"
+	 id="0"
+	 time="${TOTAL_TIME}"
+	 timestamp="${TEST_DATE}">
+EOS
+i=0
+	for name in "${TEST_NAMES[@]}"; do
+		cat >> "$path" <<EOS
+ <testcase name="${name}"
+	      classname="${TESTSUITE}.${name}"
+	      time="${TEST_TIME[i]}"
+	      >
+      <failure message="${TEST_MESSAGE[i]}"
+	       type="shell">${TEST_MESSAGE[i]}</failure>
+    </testcase>
+EOS
+	i=$((i+1))
+	done
+	cat >> "$path" <<EOS
+</testsuite>
+</testsuites>
+EOS
+}
+
+report_screen() {
+	local i=0
+	echo
+	echo "${BOLD}Test Summary${RESET}"
+	echo "Ran at ${TEST_DATE}"
+	echo
+	for name in "${TEST_NAMES[@]}"; do
+		succeeded="${TEST_SUCCESS[i]}"
+		time="${TEST_TIME[i]}"
+		if $succeeded; then
+			echo "${name} ${GREEN}SUCCEEDED${RESET} in ${time}s"
+		else
+			echo "${name} ${RED}FAILED${RESET} in ${time}s"
+		fi
+		echo "    ${TEST_MESSAGE[i]}"
+		i=$((i+1))
+	done
+	echo
+	echo "${BOLD}Tests ran in ${TOTAL_TIME}s${RESET}"
+	echo "${GREEN}Succeeded:${RESET} ${SUCCEEDED}"
+	if [ "$FAILED" -gt 0 ]; then
+		echo "${RED}Failed:${RESET} ${FAILED}"
+	fi
+}
+
+
+# this is also a script under libexec
+# I did both to allow for people to use this self-contained and purely
+# function-based, or do with file-based tests and still have access
+verbose() {
+	local verbosity="$1"
+	shift
+	local msg="$*"
+	[ "$VERBOSE" -ge "$verbosity" ] && echo "$msg"
+}
+
+
+# Get all the function tests as "[num] [cmd]"
+get_function_tests() {
+	awk '/^# *test *[0-9]/{num=$3; getline; print num,$1}' "$full_prog_path" |
+		tr -d '()'
+}
+
+# Get all the script tests as "[num] [cmd]"
+get_script_tests() {
+	# Shellcheck whines about '' and xargs and $?
+	# shellcheck disable=SC2016
+	find . -maxdepth 1 -type f $find_exec -name "test_*" -print0|
+		xargs -n1 -0 \
+		awk 'NR == 2{print $3,FILENAME}'
+}
+
+# Get all the test commands sorted by number
+get_tests() {
+	local num="$1"
+	{
+		get_script_tests
+		get_function_tests
+	}|
+		sort -k1 -n |
+		if [ -z "$num" ]; then
+			cat
+		else
+			grep "^${num} "
+		fi |
+		cut -d' ' -f 2
+}
+
+# list all the script tests as "[num]: [desc]"
+list_script_tests() {
+	# Shellcheck whines about '' and xargs and $?
+	# shellcheck disable=SC2016
+	find . -maxdepth 1 -type f $find_exec -name "test_*" -print0 |
+		xargs -0 -n1 awk 'NR == 2{printf $3": ";for(i=4;i<=NF;i++) printf $i" ";print ""}'
+}
+
+# list all the function tests as "[num]: [desc]"
+list_function_tests() {
+	awk \
+		'/^# *test *[0-9]/{printf $3": ";for(i=4;i<=NF;i++) printf $i" ";print ""}'\
+		"$full_prog_path"
+}
+
+# list all the tests as "[num]: [desc]" in numerical order
+list_tests() {
+	{
+		list_script_tests
+		list_function_tests
+	}|
+		sort -k1 -n
+}
+
+# check to see if we have colliding test numbers
+check_unique_numbers() {
+	# we're already sorted so we can skip to uniq
+	nums=$(
+		list_tests |
+			cut -d: -f 1 |
+			uniq -c |
+			awk '{ if ($1 > 1) printf $2" "}'
+		)
+	# if there are no dupes bail
+	[ -z "$nums" ] && return 0
+
+	# print a scary warning
+	echo "${RED}Colliding test numbers!${RESET}: order not guaranteed"
+	for num in $nums; do
+		echo "${BOLD}Duplicates for ${num}:${RESET}"
+		# first the function tests
+		echo "Functions:"
+		awk '/^# *test *'"$num"'/{
+		    desc=""
+		    num=$3;
+			for (i=4; i<=NF; i++) desc=desc" "$i;
+			getline;
+			print "\t"num,$1,desc
+			}' "$full_prog_path"
+		# then the script tests
+		echo "Scripts:"
+		# Shellcheck whines about '' and xargs and $?
+		# shellcheck disable=SC2016
+		find . -maxdepth 1 $find_exec -name 'test_*' -print0|
+		xargs -n1 -0 awk 'NR == 2 && $3 =='"$num"'{
+			desc="";
+			for (i=4; i<=NF; i++) desc=desc" "$i;
+			print "\t"$3,FILENAME,desc;
+			}'
+	done
+}
+
+run_test() {
+	local func="$1"
+	TOTAL=$((TOTAL + 1))
+	pre_test "$func"
+	TEST_NAMES=( "${TEST_NAMES[@]}" "${func##*/}" )
+	start=$(date +%s)
+	if output=$("$func" 2>&1); then
+		SUCCEEDED=$((SUCCEEDED + 1))
+		success "$func"
+		TEST_SUCCESS=("${TEST_SUCCESS[@]}" true)
+	else
+		FAILED=$((FAILED + 1))
+		fail "$func"
+		TEST_SUCCESS=("${TEST_SUCCESS[@]}" false)
+	fi
+	TEST_MESSAGE=("${TEST_MESSAGE[@]}" "$output")
+	test_time=$(( $(date +%s) - start ))
+	TEST_TIME=("${TEST_TIME[@]}" "$test_time")
+	post_test "$func"
+}
+
+success() {
+	local func="${1##*/}"
+	desc=$(get_desc "$func")
+	echo "${GREEN}SUCCESS: ${func}:${desc}${RESET}"
+}
+
+fail() {
+	local func="${1##*/}"
+	desc=$(get_desc "$func")
+	echo "${RED}FAIL: ${func}:${desc}${RESET}"
+}
+
+get_desc() {
+	local func="$1"
+	if [ -x "$func" ]; then
+		awk 'NR == 2{for (i=4; i<=NF; i++) printf $i" ";print ""}' "$func"
+
+	else
+		awk '$1 ~ /^'"$func"'/{print f} {f=""; for (i=4; i<=NF; i++) f=f" "$i}' "$full_prog_path"
+	fi
+}
+
+while getopts hc:j:Pt:v OPT; do
+	case "$OPT" in
+		h)
+			usage
+			exit 0
+			;;
+		c)
+			CSV_FILE="$OPTARG"
+			;;
+		j)
+			JUNIT_FILE="$OPTARG"
+			;;
+		P)
+			check_unique_numbers
+			echo ""
+			echo "${BOLD}All tests:${RESET}"
+			list_tests
+			exit 0
+			;;
+		t)
+			TESTSUITE="$OPTARG"
+			;;
+		v)
+			export VERBOSE=$((VERBOSE + 1))
+			;;
+		*)
+			echo "${prog}: Invalid argument: ${OPT}"
+			exit 22
+			;;
+	esac
+done
+
+shift $((OPTIND -1))
+TEST_NUM="$1"
+
+check_unique_numbers
+pre_run
+for test in $(get_tests "$TEST_NUM"); do
+	run_test "$test"
+done
+post_run
+TOTAL_END="$(date +%s)"
+TOTAL_TIME=$((TOTAL_END - TOTAL_START))
+
+report "$CSV_FILE" "$JUNIT_FILE"
